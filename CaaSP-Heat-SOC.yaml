@@ -1,0 +1,199 @@
+description: Template to create a CaaSP cluster on OpenStack
+heat_template_version: '2015-04-30'
+parameter_groups:
+- description: General Parameters
+  label: general
+  parameters: [image, root_password]
+- description: Sizing Parameters
+  label: sizing
+  parameters: [admin_flavor, master_flavor, worker_flavor, worker_count]
+- description: Network Parameters
+  label: network
+  parameters: [external_net]
+parameters:
+  admin_flavor:
+    constraints:
+    - {custom_constraint: nova.flavor}
+    default: m1.large
+    description: Admin Flavor
+    type: string
+  external_net: {default: floating, description: 'Name or ID of public network for
+      which floating IP addresses will be allocated', type: string}
+  image:
+    constraints:
+    - {custom_constraint: glance.image}
+    description: Name of image to use for servers
+    type: string
+  master_flavor:
+    constraints:
+    - {custom_constraint: nova.flavor}
+    default: m1.large
+    description: Master Flavor
+    type: string
+  root_password: {default: linux, description: Root Password for the VMs, type: string}
+  worker_count: {default: 2, description: Number of Worker nodes to boot, type: number}
+  worker_flavor:
+    constraints:
+    - {custom_constraint: nova.flavor}
+    default: m1.large
+    description: Worker Flavor
+    type: string
+resources:
+  admin:
+    depends_on: [external_router_int]
+    properties:
+      flavor: {get_param: admin_flavor}
+      image: {get_param: image}
+      key_name: {get_resource: keypair}
+      networks:
+      - port: {get_resource: admin_port}
+      user_data:
+        str_replace:
+          params:
+            $root_password: {get_param: root_password}
+          template: "#cloud-config\n\ndisable_root: False\nssh_deletekeys: False\n\
+            ssh_pwauth: True\n\nchpasswd:\n  list: |\n    root:$root_password\n  expire:\
+            \ False\n\nsuse_caasp:\n  role: admin\n"
+      user_data_format: RAW
+    type: OS::Nova::Server
+  admin_floating_ip:
+    depends_on: [external_router_int]
+    properties:
+      floating_network: {get_param: external_net}
+    type: OS::Neutron::FloatingIP
+  admin_floating_ip_association:
+    properties:
+      floatingip_id: {get_resource: admin_floating_ip}
+      port_id: {get_resource: admin_port}
+    type: OS::Neutron::FloatingIPAssociation
+  admin_port:
+    depends_on: [external_router_int]
+    properties:
+      network: caasp
+      security_groups:
+      - {get_resource: secgroup_base}
+      - {get_resource: secgroup_admin}
+    type: OS::Neutron::Port
+  external_router:
+    properties:
+      external_gateway_info:
+        network: {get_param: external_net}
+    type: OS::Neutron::Router
+  external_router_int:
+    properties:
+      router_id: {get_resource: external_router}
+      subnet: caasp_subnet
+    type: OS::Neutron::RouterInterface
+  keypair:
+    properties:
+      name:
+        str_replace:
+          params: {.: '-'}
+          template:
+            list_join:
+            - '-'
+            - - {get_param: 'OS::stack_name'}
+              - caasp-keypair
+      public_key: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDJOSIqz7hzjX9Leh1l1A2jxdj8+wFCfy2wUKdlKTVqBAv3diQQJ4QIOlKs/jYx3nToWLn7UmWWbF9nT9AUpoEoX/95i9mGtU3COCwbTCE2mUAVgzfQ2Vn+hdFZThWVaq25VkHRnLQsdBUhDRz5UCZOuVEetK5B0x4HC5BHi8syRBBfVAwtsXqQcv16QFEh22CgYa68bFa0ohdmNRZK88fDfJHT1iLS7aYfDpcS4T3+wU8LhkIOsGRKzlIpvqIY9/+LYyXjUsV2vsEnN6NufK/6bljpddOpNvKsN2YTzcfCJxNtkJPWm9wVnNDA7xjKt3gbUvd9Da/z1VhWL5REFMgh
+    type: OS::Nova::KeyPair
+  master:
+    depends_on: [external_router_int]
+    properties:
+      flavor: {get_param: master_flavor}
+      image: {get_param: image}
+      key_name: {get_resource: keypair}
+      networks:
+      - port: {get_resource: master_port}
+      user_data:
+        str_replace:
+          params:
+            $admin_node:
+              get_attr: [admin, first_address]
+            $root_password: {get_param: root_password}
+          template: "#cloud-config\n\ndisable_root: False\nssh_deletekeys: False\n\
+            ssh_pwauth: True\n\nchpasswd:\n  list: |\n    root:$root_password\n  expire:\
+            \ False\n\nsuse_caasp:\n  role: cluster\n  admin_node: $admin_node\n"
+      user_data_format: RAW
+    type: OS::Nova::Server
+  master_floating_ip:
+    depends_on: [external_router_int]
+    properties:
+      floating_network: {get_param: external_net}
+    type: OS::Neutron::FloatingIP
+  master_floating_ip_association:
+    properties:
+      floatingip_id: {get_resource: master_floating_ip}
+      port_id: {get_resource: master_port}
+    type: OS::Neutron::FloatingIPAssociation
+  master_port:
+    depends_on: [external_router_int]
+    properties:
+      network: caasp
+      security_groups:
+      - {get_resource: secgroup_base}
+      - {get_resource: secgroup_master}
+    type: OS::Neutron::Port
+  secgroup_admin:
+    properties:
+      rules:
+      - {port_range_max: 80, port_range_min: 80, protocol: tcp}
+      - {port_range_max: 443, port_range_min: 443, protocol: tcp}
+      - {port_range_max: 4506, port_range_min: 4505, protocol: tcp}
+      - {port_range_max: 389, port_range_min: 389, protocol: tcp}
+    type: OS::Neutron::SecurityGroup
+  secgroup_base:
+    properties:
+      rules:
+      - {protocol: icmp}
+      - {port_range_max: 22, port_range_min: 22, protocol: tcp}
+      - {port_range_max: 2379, port_range_min: 2379, protocol: tcp}
+    type: OS::Neutron::SecurityGroup
+  secgroup_master:
+    properties:
+      rules:
+      - {port_range_max: 2380, port_range_min: 2380, protocol: tcp}
+      - {port_range_max: 6444, port_range_min: 6443, protocol: tcp}
+      - {port_range_max: 8285, port_range_min: 8285, protocol: udp}
+      - {port_range_max: 32768, port_range_min: 30000, protocol: tcp}
+      - {port_range_max: 32768, port_range_min: 30000, protocol: udp}
+    type: OS::Neutron::SecurityGroup
+  secgroup_worker:
+    properties:
+      rules:
+      - {port_range_max: 80, port_range_min: 80, protocol: tcp}
+      - {port_range_max: 443, port_range_min: 443, protocol: tcp}
+      - {port_range_max: 8080, port_range_min: 8080, protocol: tcp}
+      - {port_range_max: 8081, port_range_min: 8081, protocol: tcp}
+      - {port_range_max: 2380, port_range_min: 2380, protocol: tcp}
+      - {port_range_max: 10250, port_range_min: 10250, protocol: tcp}
+      - {port_range_max: 8285, port_range_min: 8285, protocol: udp}
+      - {port_range_max: 32768, port_range_min: 30000, protocol: tcp}
+      - {port_range_max: 32768, port_range_min: 30000, protocol: udp}
+    type: OS::Neutron::SecurityGroup
+  worker:
+    depends_on: [external_router_int]
+    properties:
+      desired_capacity: {get_param: worker_count}
+      max_size: {get_param: worker_count}
+      min_size: {get_param: worker_count}
+      resource:
+        properties:
+          flavor: {get_param: worker_flavor}
+          image: {get_param: image}
+          key_name: {get_resource: keypair}
+          networks:
+          - {network: caasp}
+          security_groups:
+          - {get_resource: secgroup_base}
+          - {get_resource: secgroup_worker}
+          user_data:
+            str_replace:
+              params:
+                $admin_node:
+                  get_attr: [admin, first_address]
+              template: "#cloud-config\n\ndisable_root: False\nssh_deletekeys: False\n\
+                ssh_pwauth: True\n\nchpasswd:\n  list: |\n    root:linux\n  expire:\
+                \ False\n\nsuse_caasp:\n  role: cluster\n  admin_node: $admin_node\n"
+          user_data_format: RAW
+        type: OS::Nova::Server
+    type: OS::Heat::AutoScalingGroup
